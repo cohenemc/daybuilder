@@ -9,7 +9,8 @@ if (!D || !window.store) {
   throw new Error('Day Builder: WP_DATA or store missing');
 }
 const DOWS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-const REACHES = [['route', 'On route'], ['plus15', '+15 min'], ['plus30', '+30 min'], ['anywhere', 'Anywhere']];
+// Reach bands are exclusive: each shows only its own tier (user, S7 follow-up). 'anywhere' = every non-far place.
+const REACHES = [['route', 'In the area'], ['plus15', '+15 min detour'], ['plus30', '+30 min detour'], ['anywhere', 'Everything']];
 const REACH_KEYS = REACHES.map(r => r[0]);
 const AREAS = [
   ['stpete', 'St Pete', ['DTSP', 'STPN', 'STPW', 'GULF']],
@@ -200,7 +201,8 @@ function cardDoc(id) {
     hidden: arr(raw.hidden).filter(x => typeof x === 'string'),
     event: str(raw.event, 200),
     notes: str(raw.notes, 2000),
-    reach: REACH_KEYS.includes(raw.reach) ? raw.reach : c.min_reach,
+    // Stored as `band`: the old cumulative `reach` value meant something else and is ignored.
+    reach: REACH_KEYS.includes(raw.band) ? raw.band : 'route',
     dow: (raw.dow === 'any' || DOWS.includes(raw.dow)) ? raw.dow : null,
   };
 }
@@ -210,7 +212,10 @@ function normDay(raw) {
     order: raw.order === 'manual' ? 'manual' : 'route', savedAt: str(raw.savedAt, 40),
   };
 }
-function saveCard(id, doc) { if (!store.set('cards/' + id, doc)) saveFailed(); }
+function saveCard(id, doc) {
+  const { reach, ...rest } = doc;
+  if (!store.set('cards/' + id, Object.assign(rest, { band: reach }))) saveFailed();
+}
 function saveFailed() { toast('Could not save: this browser is blocking or out of storage.'); }
 
 function buildHomeCards() {
@@ -230,16 +235,14 @@ function buildHomeCards() {
 // ---- per-card computed context ----
 function reachIds(card, reach) {
   if (reach === 'anywhere') return NONFAR_IDS.concat(customIds);
-  let ids = card.options.route.slice();
-  if (reach !== 'route') ids = ids.concat(card.options.plus15);
-  if (reach === 'plus30') ids = ids.concat(card.options.plus30);
+  const ids = card.options[reach].slice();
   const rank = REACH_KEYS.indexOf(reach);
   const skel = skeleton(card);
   customIds.forEach(pid => {
     const p = PLACE[pid];
     const d = insertion(placePt(p), skel).cost;
     const tier = card.route.includes(p.zone) ? 0 : d <= 15 ? 1 : d <= 30 ? 2 : 3;
-    if (tier <= rank) ids.push(pid);
+    if (tier === rank) ids.push(pid);
   });
   return ids;
 }
@@ -311,26 +314,30 @@ function ctx(cardId) {
       || score(b) - score(a),
   };
 }
-// 2 best on-route + 1 off-route discovery pick (never the St Pete area on non-home cards);
-// short slots fill from discovery, then more on-route, then the St Pete area as a last resort.
-function topPicks(c, slot, n, skip) {
-  const elig = c.reachSet.filter(p => slot.has(p) && !c.pickSet.has(p.id) && !(skip && skip.has(p.id)) && !doneSet.has(p.id) && !c.hidden.has(p.id)
-    && isOpen(p, c.dow) && !tempClosed(p) && passFilters(p))
-    .sort((a, b) => c.score(b) - c.score(a));
-  const route = elig.filter(c.onRoute);
-  const disc = elig.filter(p => !c.onRoute(p) && c.offOk(p));
-  const rest = elig.filter(p => !c.onRoute(p) && !c.offOk(p));
-  const out = route.slice(0, Math.min(2, n));
-  const used = out.length;
-  out.push(...disc.slice(0, n - out.length));
-  out.push(...route.slice(used, used + n - out.length));
-  out.push(...rest.slice(0, n - out.length));
-  return out;
+// Places a Top-picks slot may offer: unpicked, not done/hidden, open that day, passing the filters.
+function eligibleIn(c, places, slot, skip) {
+  return places.filter(p => slot.has(p) && !c.pickSet.has(p.id) && !(skip && skip.has(p.id)) && !doneSet.has(p.id) && !c.hidden.has(p.id)
+    && isOpen(p, c.dow) && !tempClosed(p) && passFilters(p));
+}
+// Top picks follow the Reach band. Within it: the card's own area first, then (on cards away from
+// St Pete) anything outside the St Pete area, then score (user-approved S7 guard).
+function byPickOrder(c) {
+  return (a, b) => (c.onRoute(a) ? 0 : 1) - (c.onRoute(b) ? 0 : 1) || (c.offOk(a) ? 0 : 1) - (c.offOk(b) ? 0 : 1) || c.score(b) - c.score(a);
+}
+function topPicks(c, slot, n, skip) { return eligibleIn(c, c.reachSet, slot, skip).sort(byPickOrder(c)).slice(0, n); }
+// For a slot that is empty in this band: the first other band that has options for it.
+function otherBand(c, slot) {
+  for (const [k, label] of REACHES) {
+    if (k === c.doc.reach || k === 'anywhere') continue;
+    const n = eligibleIn(c, reachIds(c.card, k).map(pid => PLACE[pid]), slot).length;
+    if (n) return { k, label, n };
+  }
+  return null;
 }
 function zoneShort(id) { const z = ZONE[id]; return z ? z.name.split(/ \/ |: | \(/)[0] : 'Far away'; }
-function offRouteHtml(c, p, prefix) {
+function offRouteHtml(c, p) {
   if (c.onRoute(p)) return '';
-  return `<span class="offr" title="Not on this card's route. Widen Reach to see more like it.">↪ ${prefix || ''}${esc(zoneShort(p.zone))}</span>`;
+  return `<span class="offr" title="Outside this card's area: a detour on the way there or back">↪ ${esc(zoneShort(p.zone))}</span>`;
 }
 function dwellFor(cardId, p) {
   const o = settings.dwellOverrides[cardId + '|' + p.id];
@@ -381,7 +388,7 @@ function warnings(c, p) {
 }
 
 // ---- rendering: shared bits ----
-function tagsHtml(p) {
+function tagsHtml(p, labels) {
   const out = [];
   ALL_TAGS.forEach(tg => {
     const on = tg.key === 'gf' ? p.gf === 'yes' : p.tags.includes(tg.key);
@@ -390,12 +397,20 @@ function tagsHtml(p) {
     if (tg.key === 'gf' && p.gf_note) note += ': ' + p.gf_note;
     if (tg.key === 'dog' && p.dog_note) note += ': ' + p.dog_note;
     if (tg.key === 'special' && p.special_note) note += ': ' + p.special_note;
-    out.push(`<span class="tg" title="${esc(note)}" aria-label="${esc(note)}">${esc(tg.emoji)}</span>`);
+    out.push(labels ? `<span class="tg tgl" title="${esc(note)}">${esc(tg.emoji)} ${esc(tg.label)}</span>`
+      : `<span class="tg" title="${esc(note)}" aria-label="${esc(note)}">${esc(tg.emoji)}</span>`);
   });
   return out.length ? `<span class="tags">${out.join('')}</span>` : '';
 }
+// The business's own Google Maps listing (stars, reviews, photos). The saved /maps/place/…/data= links
+// stopped resolving (they open a bare map), but ?cid=<decimal of the id's 2nd hex half> does.
+function placeUrl(p) {
+  const m = !p.custom && /:0x([0-9a-f]+)$/i.exec(p.id);
+  if (m) { try { return 'https://www.google.com/maps?cid=' + BigInt('0x' + m[1]).toString(); } catch (e) { /* no BigInt */ } }
+  return safeUrl(p.url);
+}
 function nameLink(p, cls) {
-  return `<a class="${cls || 'pname'}" href="${esc(safeUrl(p.url))}" target="_blank" rel="noopener noreferrer">${esc(p.name)}</a>`;
+  return `<a class="${cls || 'pname'}" href="${esc(placeUrl(p))}" target="_blank" rel="noopener noreferrer">${esc(p.name)}</a>`;
 }
 function detHtml(c, p) {
   const d = c.det(p);
@@ -422,6 +437,8 @@ function renderLegend() {
     <div><h3>Numbers</h3><ul class="leg plain">
       <li><b>4.6 (1,203)</b> Google rating (reviews); — means no rating</li>
       <li><b>+15 min</b> extra driving this stop adds to the day as currently planned</li>
+      <li><b>In the area · +15 · +30 · Everything</b> which places you're browsing: the card's own towns, or detours of up to 15 or 15–30 min on the way. Stops you've added stay on your day whatever you browse</li>
+      <li><b>↪ Ybor</b> outside the card's area (here: Ybor)</li>
       <li><b>⌂ 55 min</b> drive from home to the card's main area</li>
       <li><b>✓ Done</b> places you've been; "Hide done" keeps picks fresh</li>
       <li><b>📌</b> pinned: a staple of this card's area, listed first</li>
@@ -460,6 +477,13 @@ function renderFilters() {
     <div class="fgroup"><span>Tags</span>${FILTER_TAGS.map(k => chip('f-tag', k, TAG[k].emoji, f.tags.includes(k), TAG[k].label)).join('')}${chip('f-done', '1', 'Hide done', f.hideDone)}</div>
     <div class="fgroup search"><input type="search" id="q" placeholder="Search places, e.g. tacos, kayak, Dunedin" aria-label="Search places" value="${esc(f.q)}" autocomplete="off"></div>`;
 }
+function bestAnyBand(c, slot) {
+  for (const k of ['route', 'plus15', 'plus30']) {
+    const p = eligibleIn(c, reachIds(c.card, k).map(pid => PLACE[pid]), slot).sort(byPickOrder(c))[0];
+    if (p) return p;
+  }
+  return null;
+}
 function renderTiles(days) {
   const f = ui.filters;
   const q = f.q.trim().toLowerCase();
@@ -475,18 +499,20 @@ function renderTiles(days) {
     const m = matchesBy[card.id] || [];
     if (q && !m.length) return '';
     const c = ctx(card.id);
-    const pool = c.reachSet.filter(passFilters);
+    // Tiles judge a card by everything up to +30 min, whatever band its builder shows.
+    const pool = ['route', 'plus15', 'plus30'].flatMap(k => reachIds(card, k)).map(pid => PLACE[pid]).filter(passFilters);
     if (f.tags.length && !pool.length) return '';
     shown++;
-    const bb = topPicks(c, SLOTS[0], 1)[0], ba = topPicks(c, SLOTS[2], 1)[0];
-    const stars = pool.filter(p => p.tags.includes('ultra')).length;
+    const bb = bestAnyBand(c, SLOTS[0]), ba = bestAnyBand(c, SLOTS[2]);
+    const area = pool.filter(c.onRoute);
+    const stars = area.filter(p => p.tags.includes('ultra')).length;
     const nd = dayCount[card.id] || 0;
     const picks = c.picks;
     return `<button type="button" class="tile" data-act="open-card" data-card="${esc(card.id)}">
       <span class="tile-top"><span class="mono drive">⌂ ${mfh ? esc(fmtDur(mfh)) : 'home'}</span>${nd ? `<span class="pill p-day">Saved days: ${nd}</span>` : ''}</span>
       <span class="tile-title">${esc(card.title)}</span>
       <span class="tile-sub">${esc(card.subtitle)}</span>
-      <span class="tile-count mono">★ ${stars} · ${pool.length} places</span>
+      <span class="tile-count mono">★ ${stars} · ${area.length} in the area · ${pool.length - area.length} more on the way</span>
       ${m.length ? `<span class="tile-best match">Matches: ${m.slice(0, 3).map(p => esc(p.name)).join(', ')}${m.length > 3 ? ` +${m.length - 3}` : ''}</span>` : `
       <span class="tile-best">${esc(CAT.breakfast.emoji)} ${bb ? esc(bb.name) : '<i>none open</i>'}</span>
       <span class="tile-best">🧭 ${ba ? esc(ba.name) : '<i>none open</i>'}</span>`}
@@ -566,6 +592,12 @@ function renderControls(c) {
       <label class="dowsel">Day <select id="cDow"><option value=""${c.doc.dow == null ? ' selected' : ''}>Default (${settings.dow === 'any' ? 'any' : settings.dow})</option>${dowOptions(c.doc.dow)}</select></label>
     </div>`;
 }
+function emptySlot(c, s) {
+  if (c.picks.some(s.has)) return '<p class="empty sm">Picked ✓</p>';
+  const o = otherBand(c, s);
+  const here = REACHES.find(r => r[0] === c.doc.reach)[1];
+  return `<p class="empty sm">None ${c.doc.reach === 'route' ? 'in the area' : 'in “' + esc(here) + '”'}.${o ? ` <button type="button" class="lnk" data-act="reach" data-v="${o.k}">See ${esc(o.label)} (${o.n})</button>` : ''}</p>`;
+}
 function renderTop(c) {
   const shown = new Set();   // dual-category places appear in one column only
   $('bTop').innerHTML = `<div class="topgrid">${SLOTS.map(s => {
@@ -575,10 +607,10 @@ function renderTop(c) {
       const w = warnings(c, p);
       return `<div class="tchip" data-pid="${esc(p.id)}">
         <span class="tname">${esc(CAT[p.category].emoji)} ${nameLink(p)}</span>
-        <span class="tmeta">${fmtRating(p)} ${detHtml(c, p)} ${offRouteHtml(c, p, 'Off route · ')}</span>${w.length ? `<span class="twarn" title="${esc(w.join(' · '))}">⚠ ${esc(w[0])}${w.length > 1 ? ` (+${w.length - 1})` : ''}</span>` : ''}
+        <span class="tmeta">${fmtRating(p)} ${tagsHtml(p)} ${detHtml(c, p)} ${offRouteHtml(c, p)}</span>${w.length ? `<span class="twarn" title="${esc(w.join(' · '))}">⚠ ${esc(w[0])}${w.length > 1 ? ` (+${w.length - 1})` : ''}</span>` : ''}
         <button type="button" class="add sm" data-act="add" data-pid="${esc(p.id)}" aria-label="Add ${esc(p.name)}">+</button>
       </div>`;
-    }).join('') : `<p class="empty sm">${c.picks.some(s.has) ? 'Picked ✓' : 'Nothing open in this reach. Try a wider reach.'}</p>`}</div>`;
+    }).join('') : emptySlot(c, s)}</div>`;
   }).join('')}</div>`;
 }
 function renderTimeline(c) {
@@ -615,7 +647,8 @@ function renderTimeline(c) {
 }
 function gmapsDirUrl(c) {
   const h = settings.home.lat + ',' + settings.home.lng;
-  const wps = c.picks.slice(0, GMAPS_MAX_WAYPOINTS).map(p => p.lat.toFixed(6) + ',' + p.lng.toFixed(6));
+  // "Name, address" makes Google show each stop as the business; '|' separates waypoints so strip it from names.
+  const wps = c.picks.slice(0, GMAPS_MAX_WAYPOINTS).map(p => p.address ? p.name.replace(/\|/g, ' ') + ', ' + p.address : p.lat.toFixed(6) + ',' + p.lng.toFixed(6));
   return 'https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=' + encodeURIComponent(h) + '&destination=' + encodeURIComponent(h)
     + (wps.length ? '&waypoints=' + encodeURIComponent(wps.join('|')) : '');
 }
@@ -639,7 +672,8 @@ function rowHtml(c, p, hiddenRow) {
   return `<li class="row${done ? ' done' : ''}${tempClosed(p) ? ' tclosed' : ''}" data-pid="${esc(p.id)}">
     <button type="button" class="add" data-act="add" data-pid="${esc(p.id)}" aria-label="Add ${esc(p.name)}">+</button>
     <div class="rmain">
-      <div class="rtop">${nameLink(p)}${c.pinned.has(p.id) ? '<span class="pin" title="Pinned for this card">📌</span>' : ''} ${fmtRating(p)}${p.price ? ` <span class="price">${esc(p.price)}</span>` : ''} ${tagsHtml(p)} ${detHtml(c, p)} ${offRouteHtml(c, p)}</div>
+      <div class="rtop">${nameLink(p)}${c.pinned.has(p.id) ? '<span class="pin" title="Pinned for this card">📌</span>' : ''} ${fmtRating(p)}${p.price ? ` <span class="price">${esc(p.price)}</span>` : ''} ${detHtml(c, p)} ${offRouteHtml(c, p)}</div>
+      ${tagsHtml(p, true)}
       ${p.hours_note ? `<div class="hn">${esc(p.hours_note)}</div>` : ''}
       <div class="desc">${esc(p.desc)}</div>
       ${p.special_note ? `<div class="sn">📝 ${esc(p.special_note)}</div>` : ''}
@@ -687,7 +721,7 @@ function renderOptions(c, pool) {
 }
 function groupBody(c, items, n, slug) {
   const rem = items.length - n;
-  const label = ui.optQ.trim() ? 'Off route' : 'Off route, within ' + REACHES.find(r => r[0] === c.doc.reach)[1].replace('Anywhere', 'any distance');
+  const label = 'Outside this card\'s area';
   const firstOff = items.findIndex((p, i) => i > 0 && !c.onRoute(p) && c.onRoute(items[i - 1]));
   return `<ul class="rows">${items.slice(0, n).map((p, i) => (i === firstOff ? `<li class="divider">${esc(label)}</li>` : '') + rowHtml(c, p, false)).join('')}</ul>
     ${rem > 0 ? `<button type="button" class="ghost more" data-act="more" data-cat="${esc(slug)}">Show ${Math.min(rem, SHOW_STEP)} more</button>` : ''}`;
