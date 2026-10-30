@@ -1,1 +1,62 @@
-<!doctype html><meta charset="utf-8"><title>Day Builder</title><p>Day Builder is being built. Check back soon.</p><script src="data.js"></script><script>document.body.insertAdjacentHTML("beforeend","<p>"+WP_DATA.places.length+" places loaded.</p>")</script>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Gulf Coast Day Builder</title>
+<meta name="description" content="Build a day trip from saved Gulf Coast places: pick stops, see the route and the time each choice costs.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gloock&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" integrity="sha512-h9FcoyWjHcOcmEVkxOfTLnmZFWIH0iZhZT1H2TbOq55xssQGEJHEaIm+PgoUaZbRvQTNTluNOEfb1ZRy6D3BOw==" crossorigin="anonymous" referrerpolicy="no-referrer">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" integrity="sha512-puJW3E/qXDqYp9IfhAI54BJEaWIfloJ7JWs7OeD5i6ruC9JZL1gERT1wjtwXFlh7CjE7ZJ+/vcRZRkIYIb6p4g==" crossorigin="anonymous" referrerpolicy="no-referrer" defer></script>
+<script src="data.js" defer></script>
+<script src="store.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<div id="picker" class="level1" hidden>
+  <header class="top">
+    <div class="eyebrow">Day trips from downtown St Pete · leave in the morning, home for bed</div>
+    <h1>Gulf Coast Day Builder</h1>
+    <p class="sub">Pick an area, tap the places you want, and see the day as it would run: route, drive time, and when you get home.</p>
+    <div class="hdr-row">
+      <details class="panel" id="legendPanel"><summary>Legend</summary><div id="legend" class="legend-body"></div></details>
+      <details class="panel" id="settingsPanel"><summary>Settings &amp; saves</summary><div id="settings" class="settings-body"></div></details>
+      <span class="savednote" id="savedNote"></span>
+    </div>
+  </header>
+  <div class="filters" id="filters" role="toolbar" aria-label="Filters"></div>
+  <p class="count" id="tileCount" aria-live="polite"></p>
+  <main class="tiles" id="tiles"></main>
+  <section class="days" aria-labelledby="daysH">
+    <h2 id="daysH">Saved days</h2>
+    <div id="savedDays"></div>
+  </section>
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<div id="builder" class="level2" hidden>
+  <div class="bcols">
+    <div class="bmain">
+      <section class="bpanel" data-panel="build" id="buildPanel"></section>
+      <section class="bpanel" data-panel="options" id="optionsPanel"></section>
+    </div>
+    <aside class="bmap bpanel" data-panel="map">
+      <div id="map" role="region" aria-label="Map of options and route"></div>
+      <div class="mapbar" id="mapBar"></div>
+    </aside>
+  </div>
+  <nav class="tabbar" id="tabbar" aria-label="Builder sections">
+    <button type="button" data-act="tab" data-tab="build">Build</button>
+    <button type="button" data-act="tab" data-tab="map">Map</button>
+    <button type="button" data-act="tab" data-tab="options">Options</button>
+  </nav>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="modal" id="modal" hidden><div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle" id="modalCard"></div></div>
+<noscript><p style="padding:16px">This page needs JavaScript.</p></noscript>
+</body>
+</html>
