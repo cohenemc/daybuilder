@@ -32,14 +32,14 @@ const START_RE = /^\d{1,2}:\d{2}$/;
 const DWELL_MIN = 5, DWELL_MAX = 600;
 const DEFAULT_SETTINGS = { home: { lat: D.home.lat, lng: D.home.lng }, start: '09:00', dow: 'any', dwellOverrides: {} };
 
-const CAT = {}; D.categories.forEach(c => { CAT[c.slug] = c; });
+const CAT = Object.create(null); D.categories.forEach(c => { CAT[c.slug] = c; });
 const CAT_ORDER = D.categories.map(c => c.slug);
 const ALL_TAGS = D.tags.concat([CUSTOM_TAG]);
 const TAG = {}; ALL_TAGS.forEach(t => { TAG[t.key] = t; });
 const CAT_IDX = {}; CAT_ORDER.forEach((s, i) => { CAT_IDX[s] = i; });
-const ZONE = {}; D.zones.forEach(z => { ZONE[z.id] = z; });
-const CARD = {}; D.cards.forEach(c => { CARD[c.id] = c; });
-const PLACE = {}; D.places.forEach(p => { PLACE[p.id] = p; });
+const ZONE = Object.create(null); D.zones.forEach(z => { ZONE[z.id] = z; });
+const CARD = Object.create(null); D.cards.forEach(c => { CARD[c.id] = c; });
+const PLACE = Object.create(null); D.places.forEach(p => { PLACE[p.id] = p; });
 const HOME_ZONES = AREAS[0][2];   // the St Pete area (ranking guard)
 const ROUTE_SET = {}; D.cards.forEach(c => { ROUTE_SET[c.id] = new Set(c.options.route); });
 const NONFAR_IDS = D.places.filter(p => !p.tags.includes('far')).map(p => p.id);
@@ -56,7 +56,7 @@ let customIds = [];
 let doneSet = new Set();
 let homeCard = {};             // placeId -> cardId that search jumps to
 const ui = {
-  cardId: null, tab: 'build', optQ: '', nextOptQ: '', shown: {}, open: {}, pickerScroll: 0,
+  cardId: null, tab: 'build', tabScroll: {}, optQ: '', nextOptQ: '', shown: {}, open: {}, pickerScroll: 0,
   filters: { area: 'all', drive: 'any', tags: [], hideDone: false, q: '' },
   ctx: null, editDwell: null, saving: false, confirmDel: null, pendingImport: null, fitNext: false,
 };
@@ -299,20 +299,22 @@ function ctx(cardId) {
   const homeCardFlag = card.route.some(z => HOME_ZONES.includes(z));
   const onRoute = p => routeSet.has(p.id) || (!!p.custom && card.route.includes(p.zone));
   const offOk = p => homeCardFlag || !HOME_ZONES.includes(p.zone);
+  const inactive = p => doneSet.has(p.id) || tempClosed(p);
   return {
     card, doc, dow, picks, pickIds, pickSet, pinned, hidden, reachSet, onRoute, offOk,
     det: p => round5(raw(p)), score,
     rank: (a, b) => (pinned.has(a.id) ? 0 : 1) - (pinned.has(b.id) ? 0 : 1)
       || (onRoute(a) ? 0 : 1) - (onRoute(b) ? 0 : 1)
       || (offOk(a) ? 0 : 1) - (offOk(b) ? 0 : 1)
+      || (inactive(a) ? 1 : 0) - (inactive(b) ? 1 : 0)
       || (b.tags.includes('ultra') ? 1 : 0) - (a.tags.includes('ultra') ? 1 : 0)
       || score(b) - score(a),
   };
 }
 // 2 best on-route + 1 off-route discovery pick (never the St Pete area on non-home cards);
 // short slots fill from discovery, then more on-route, then the St Pete area as a last resort.
-function topPicks(c, slot, n) {
-  const elig = c.reachSet.filter(p => slot.has(p) && !c.pickSet.has(p.id) && !doneSet.has(p.id) && !c.hidden.has(p.id)
+function topPicks(c, slot, n, skip) {
+  const elig = c.reachSet.filter(p => slot.has(p) && !c.pickSet.has(p.id) && !(skip && skip.has(p.id)) && !doneSet.has(p.id) && !c.hidden.has(p.id)
     && isOpen(p, c.dow) && !tempClosed(p) && passFilters(p))
     .sort((a, b) => c.score(b) - c.score(a));
   const route = elig.filter(c.onRoute);
@@ -368,7 +370,7 @@ function warnings(c, p) {
   const w = [];
   if (!isOpen(p, c.dow)) w.push('Closed on ' + c.dow);
   ['breakfast', 'coffee'].forEach(slug => {
-    if (p.category === slug && c.picks.some(q => q.category === slug)) w.push(`You already have a ${CAT[slug].label.toLowerCase()} stop — this adds a second`);
+    if (inCat(p, slug) && c.picks.some(q => inCat(q, slug))) w.push(`You already have a ${CAT[slug].label.toLowerCase()} stop — this adds a second`);
   });
   if (p.category === 'meals' && c.picks.filter(q => q.category === 'meals').length >= 2) w.push('You already have 2 meals — this adds a third');
   const hb = timeline(c.card.id, picksWith(c, p), false).homeBy;
@@ -415,7 +417,7 @@ function renderLegend() {
   const tags = ALL_TAGS.map(tg => `<li><span class="tg">${esc(tg.emoji)}</span> ${esc(tg.label)}</li>`).join('');
   const cats = D.categories.map(c => `<li><span class="dot" style="background:var(--c-${esc(c.slug)})"></span>${esc(c.emoji)} ${esc(c.label)}</li>`).join('');
   $('legend').innerHTML = `
-    <div><h3>Tags</h3><ul class="leg">${tags}</ul><p class="hint">Hover or long-press an icon for its note (gluten, dog, special).</p></div>
+    <div><h3>Tags</h3><ul class="leg">${tags}</ul><p class="hint">Gluten, dog and special notes show under each place in the options list.</p></div>
     <div><h3>Categories &amp; map pins</h3><ul class="leg">${cats}</ul></div>
     <div><h3>Numbers</h3><ul class="leg plain">
       <li><b>4.6 (1,203)</b> Google rating (reviews); — means no rating</li>
@@ -565,13 +567,15 @@ function renderControls(c) {
     </div>`;
 }
 function renderTop(c) {
+  const shown = new Set();   // dual-category places appear in one column only
   $('bTop').innerHTML = `<div class="topgrid">${SLOTS.map(s => {
-    const list = topPicks(c, s, 3);
+    const list = topPicks(c, s, 3, shown);
+    list.forEach(p => shown.add(p.id));
     return `<div class="topcol"><div class="toph">${s.emoji} ${esc(s.label)}</div>${list.length ? list.map(p => {
       const w = warnings(c, p);
       return `<div class="tchip" data-pid="${esc(p.id)}">
         <span class="tname">${esc(CAT[p.category].emoji)} ${nameLink(p)}</span>
-        <span class="tmeta">${fmtRating(p)} ${detHtml(c, p)} ${offRouteHtml(c, p, 'Off route · ')}${w.length ? ` <span class="wico" title="${esc(w.join(' · '))}">⚠</span>` : ''}</span>
+        <span class="tmeta">${fmtRating(p)} ${detHtml(c, p)} ${offRouteHtml(c, p, 'Off route · ')}</span>${w.length ? `<span class="twarn" title="${esc(w.join(' · '))}">⚠ ${esc(w[0])}${w.length > 1 ? ` (+${w.length - 1})` : ''}</span>` : ''}
         <button type="button" class="add sm" data-act="add" data-pid="${esc(p.id)}" aria-label="Add ${esc(p.name)}">+</button>
       </div>`;
     }).join('') : `<p class="empty sm">${c.picks.some(s.has) ? 'Picked ✓' : 'Nothing open in this reach. Try a wider reach.'}</p>`}</div>`;
@@ -625,7 +629,8 @@ function renderActions(c) {
       <button type="button" class="ghost" data-act="clear"${n ? '' : ' disabled'}>Clear picks</button>
       <a class="btn ghostbtn${n ? '' : ' disabled'}" ${n ? `href="${esc(gmapsDirUrl(c))}" target="_blank" rel="noopener noreferrer"` : 'aria-disabled="true"'}>Open in Google Maps ↗</a>
     </div>
-    ${n > GMAPS_MAX_WAYPOINTS ? `<p class="hint">Google Maps takes ${GMAPS_MAX_WAYPOINTS} stops in a link; it opens with your first ${GMAPS_MAX_WAYPOINTS}.</p>` : ''}`;
+    ${n > GMAPS_MAX_WAYPOINTS ? `<p class="hint">Google Maps takes ${GMAPS_MAX_WAYPOINTS} stops in a link; it opens with your first ${GMAPS_MAX_WAYPOINTS}.</p>`
+      : n > 3 ? '<p class="hint">On a phone without the Google Maps app, the link may show only your first 3 stops.</p>' : ''}`;
   if (ui.saving && typed == null) { const el = $('dayName'); if (el) { el.focus(); el.select(); } }
 }
 function rowHtml(c, p, hiddenRow) {
@@ -638,6 +643,8 @@ function rowHtml(c, p, hiddenRow) {
       ${p.hours_note ? `<div class="hn">${esc(p.hours_note)}</div>` : ''}
       <div class="desc">${esc(p.desc)}</div>
       ${p.special_note ? `<div class="sn">📝 ${esc(p.special_note)}</div>` : ''}
+      ${p.gf === 'yes' && p.gf_note ? `<div class="sn">${esc(TAG.gf.emoji)} ${esc(p.gf_note)}</div>` : ''}
+      ${p.tags.includes('dog') && p.dog_note ? `<div class="sn">${esc(TAG.dog.emoji)} ${esc(p.dog_note)}</div>` : ''}
       ${w.length ? `<div class="warns">${w.map(x => `<span class="warn">⚠ ${esc(x)}</span>`).join('')}</div>` : ''}
       <div class="racts">
         <button type="button" class="lnk${done ? ' on' : ''}" data-act="done" data-pid="${esc(p.id)}" aria-pressed="${done}">✓ Done</button>
@@ -664,7 +671,7 @@ function renderOptions(c, pool) {
   const groups = CAT_ORDER.map(slug => ({ slug, items: vis.filter(p => inCat(p, slug)).sort(c.rank) })).filter(g => g.items.length);
   const key = s => c.card.id + '|' + s;
   const html = groups.map(g => {
-    const cat = CAT[g.slug], best = g.items[0];
+    const cat = CAT[g.slug], best = g.items.find(p => !doneSet.has(p.id) && !tempClosed(p)) || g.items[0];
     const open = !!ui.open[key(g.slug)];
     const n = ui.shown[key(g.slug)] || SHOW_FIRST;
     return `<details class="og" data-cat="${esc(g.slug)}"${open ? ' open' : ''}>
@@ -964,26 +971,37 @@ function route() {
       ui.editDwell = null; ui.saving = false; ui.fitNext = true;
       ui.optQ = ui.nextOptQ; ui.nextOptQ = '';   // search text carries only into the card opened from a search
       renderBuilderShell(CARD[id], cardDoc(id));
+      ui.tabScroll = {};
       setTab(ui.tab);
       window.scrollTo(0, 0);
+    } else {
+      // Same card re-routed (e.g. another tab changed the saves): refresh Event/Notes unless being typed in.
+      const doc = cardDoc(id), a = document.activeElement;
+      if (a !== $('cEvent')) $('cEvent').value = doc.event;
+      if (a !== $('cNotes')) $('cNotes').value = doc.notes;
     }
     document.title = CARD[id].title + ' · Gulf Coast Day Builder';
     initMap();
     renderBuilder();
     if (map) setTimeout(() => map.invalidateSize(), 0);
   } else {
+    const fromCard = ui.cardId != null;
     ui.cardId = null; ui.ctx = null;
     $('builder').hidden = true;
     $('picker').hidden = false;
     document.title = 'Gulf Coast Day Builder';
     renderPicker();
-    window.scrollTo(0, ui.pickerScroll);
+    if (fromCard) window.scrollTo(0, ui.pickerScroll);
   }
 }
+// Phone tabs share one page scroll; each tab keeps its own position.
 function setTab(tab) {
+  if (tab !== ui.tab) { ui.tabScroll[ui.tab] = window.scrollY; }
+  const switched = tab !== ui.tab;
   ui.tab = tab;
   $('builder').dataset.tab = tab;
   document.querySelectorAll('#tabbar button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tab === tab)));
+  if (switched) window.scrollTo(0, ui.tabScroll[tab] || 0);
   if (tab === 'map' && map) setTimeout(() => { map.invalidateSize(); if (pinsStale && ui.cardId) renderBuilder(); }, 0);
 }
 
@@ -1097,7 +1115,6 @@ function onChange(e) {
   const el = e.target;
   if (el.id === 'cDow') { mutateCard(doc => { doc.dow = el.value || null; }); return; }
   if (el.id === 'importFile') { startImport(el.files[0]); el.value = ''; return; }
-  if (el.id === 'dwellIn') { commitDwell(el); return; }
   if (el.id === 'setLat' || el.id === 'setLng') {
     const lat = parseFloat($('setLat').value), lng = parseFloat($('setLng').value);
     if (validHome(lat, lng)) { settings.home = { lat, lng }; saveSettings(); renderTiles(); }
@@ -1106,7 +1123,15 @@ function onChange(e) {
   if (el.id === 'setStart') { if (START_RE.test(el.value)) { settings.start = el.value; saveSettings(); renderSavedDays(); } return; }
   if (el.id === 'setDow') { settings.dow = el.value; saveSettings(); renderTiles(); }
 }
-function commitDwell(el) {
+// After a pointer tap ends (or 600 ms), so a blur-triggered re-render cannot eat that tap.
+function renderAfterTap() {
+  let done = false, tm = null;
+  const go = () => { if (done) return; done = true; clearTimeout(tm); document.removeEventListener('pointerup', up, true); if (ui.cardId) renderBuilder(); };
+  const up = () => setTimeout(go, 0);
+  document.addEventListener('pointerup', up, true);
+  tm = setTimeout(go, 600);
+}
+function commitDwell(el, now) {
   const pid = ui.editDwell;
   if (!pid || !ui.cardId) return;
   ui.editDwell = null;
@@ -1114,7 +1139,7 @@ function commitDwell(el) {
   if (v >= DWELL_MIN && v <= DWELL_MAX && v !== CAT[PLACE[pid].category].dwell) settings.dwellOverrides[k] = v;
   else delete settings.dwellOverrides[k];
   saveSettings();
-  renderBuilder();
+  if (now) renderBuilder(); else renderAfterTap();
 }
 function onSubmit(e) {
   if (e.target.id === 'saveDayForm') {
@@ -1148,7 +1173,7 @@ function onKey(e) {
     const first = document.querySelector('#tiles .tile');
     if (first) openCard(first.dataset.card, true);
   }
-  if (e.key === 'Enter' && e.target.id === 'dwellIn') { e.preventDefault(); e.target.blur(); }
+  if (e.key === 'Enter' && e.target.id === 'dwellIn') { e.preventDefault(); commitDwell(e.target, true); }
 }
 function onHover(e) {
   if (!ui.cardId) return;
@@ -1179,6 +1204,7 @@ function init() {
     extTimer = setTimeout(() => { reloadState(); buildHomeCards(); route(); }, 100);
   });
   try {
+    window.matchMedia('(max-width: 860px)').addEventListener('change', () => { if (ui.cardId) { setTab(ui.tab); if (pinsStale) renderBuilder(); } });
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (map) { readColors(); if (ui.cardId) renderBuilder(); } });
   } catch (e) { /* old browser */ }
   route();
